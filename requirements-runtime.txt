@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+rich
+pandas
+yfinance
+akshare
+tushare
+python-docx
+reportlab

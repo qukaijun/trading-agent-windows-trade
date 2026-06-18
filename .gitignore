@@ -1,0 +1,36 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.venv-*/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project specific
+logs/
+output/
+release/
+runtime/
+wheelhouse/
+vendor/
+*.pid
+.env
+mt5_signal.json
+data_source_checks.json
+
+# License secrets
+license-secret.txt
+dev-keys/
+
+*.iso
