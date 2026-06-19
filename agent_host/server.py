@@ -20,8 +20,10 @@ from agent_host.model_connection import test_model_connection
 from agent_host.mt5_bridge import clear_signal, get_signal, save_signal
 from agent_host.report_export import export_filename, export_report_docx, export_report_pdf
 from agent_host.report_store import get_report_markdown, get_report_record, list_report_records
+from agent_host.robot_manager import get_robot_manager
 from agent_host.runner import analyze_with_tradingagents, upstream_status
 from agent_host.scheduler import get_scheduler
+from agent_host.strategy_engine import compile_strategy, list_strategy_templates
 from agent_host.ui import render_home
 
 
@@ -30,6 +32,14 @@ if CONFIG_PATH.exists():
     load_dotenv(CONFIG_PATH, override=True)
 
 app = FastAPI(title="TradingAgents 中文服务工作台", version=APP_VERSION)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -240,6 +250,59 @@ def analyze_api(
             result["signal_error"] = "AI recommends WAIT"
 
     return result
+
+
+# ─── Strategy Compiler ───────────────────────────────
+@app.get("/api/strategy/templates")
+def strategy_templates_api() -> dict[str, object]:
+    return list_strategy_templates()
+
+
+@app.post("/api/strategy/compile")
+def strategy_compile_api(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+    try:
+        return compile_strategy(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ─── Demo Robot Manager ──────────────────────────────
+@app.get("/api/robots/status")
+def robots_status_api() -> dict[str, object]:
+    return get_robot_manager().status()
+
+
+@app.post("/api/robots/start")
+def robots_start_api(payload: dict[str, object] = Body(...)) -> dict[str, object]:
+    strategy = payload.get("strategy")
+    if not isinstance(strategy, dict):
+        raise HTTPException(status_code=400, detail="缺少 strategy。")
+    return get_robot_manager().start(strategy)
+
+
+@app.post("/api/robots/{robot_id}/stop")
+def robots_stop_api(robot_id: str) -> dict[str, object]:
+    try:
+        return get_robot_manager().stop(robot_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/robots/{robot_id}/remove")
+def robots_remove_api(robot_id: str) -> dict[str, object]:
+    try:
+        return get_robot_manager().remove(robot_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/robots/run-once")
+def robots_run_once_api(payload: dict[str, object] = Body(default_factory=dict)) -> dict[str, object]:
+    robot_id = payload.get("robot_id")
+    try:
+        return get_robot_manager().run_once(str(robot_id) if robot_id else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 # ─── Scheduler ────────────────────────────────────────

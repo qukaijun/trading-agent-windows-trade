@@ -154,6 +154,108 @@ export async function clearSignal() {
   return request<Mt5Signal>(`/api/mt5/clear-signal`, { method: "POST" });
 }
 
+// --- Strategy Compiler ---
+export interface StrategyTemplate {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  default_symbol: string;
+  default_type: string;
+  default_timeframe: string;
+  beginner_level: string;
+  prompt: string;
+  required_fields: string[];
+  tags: string[];
+}
+
+export interface CompiledStrategy {
+  id: string;
+  name: string;
+  source: string;
+  prompt: string;
+  template_id: string;
+  status: string;
+  symbol: { raw: string; market: string; canonical: string; yfinance: string; display: string; confidence: string; notes?: string };
+  strategy_type: string;
+  timeframe: string;
+  mode: string;
+  action: string;
+  volume: number;
+  entry: Record<string, unknown>;
+  exit: Record<string, unknown>;
+  risk: Record<string, unknown>;
+  schedule: Record<string, unknown>;
+  assumptions: string[];
+  missing_fields: string[];
+  warnings: string[];
+  explain: string[];
+  compiled_at: string;
+}
+
+export async function fetchStrategyTemplates() {
+  return request<{ templates: StrategyTemplate[] }>(`/api/strategy/templates`);
+}
+
+export async function compileStrategy(payload: { prompt?: string; template_id?: string; symbol?: string }) {
+  return request<{ status: string; strategy: CompiledStrategy }>(`/api/strategy/compile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+// --- Demo Robots ---
+export interface RobotEvent {
+  time: string;
+  type: string;
+  message: string;
+  price: number;
+  action: string;
+}
+
+export interface StrategyRobot {
+  id: string;
+  name: string;
+  status: string;
+  mode: string;
+  strategy: CompiledStrategy;
+  created_at: string;
+  updated_at: string;
+  last_price: number;
+  last_action: string;
+  run_count: number;
+  signal_count: number;
+  events: RobotEvent[];
+}
+
+export async function fetchRobotsStatus() {
+  return request<{ robots: StrategyRobot[]; running_count: number; updated_at: string }>(`/api/robots/status`);
+}
+
+export async function startRobot(strategy: CompiledStrategy) {
+  return request<StrategyRobot>(`/api/robots/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ strategy }),
+  });
+}
+
+export async function stopRobot(robotId: string) {
+  return request<StrategyRobot>(`/api/robots/${encodeURIComponent(robotId)}/stop`, { method: "POST" });
+}
+
+export async function removeRobot(robotId: string) {
+  return request<StrategyRobot>(`/api/robots/${encodeURIComponent(robotId)}/remove`, { method: "POST" });
+}
+
+export async function runRobotsOnce(robotId?: string) {
+  return request<{ runs: RobotEvent[]; robots: StrategyRobot[] }>(`/api/robots/run-once`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(robotId ? { robot_id: robotId } : {}),
+  });
+}
 
 // --- Scheduler ---
 export interface SchedulerStatus {

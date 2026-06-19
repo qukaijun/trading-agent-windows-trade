@@ -21,6 +21,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   TrendingDown,
   TrendingUp,
   Wifi,
@@ -29,21 +30,31 @@ import {
 import KlineChart from "./components/KlineChart";
 import {
   clearSignal,
+  compileStrategy,
   configureScheduler,
   fetchCurrentSignal,
   fetchPrice,
   fetchReportMarkdown,
   fetchReports,
+  fetchRobotsStatus,
   fetchSchedulerStatus,
   fetchStatus,
+  fetchStrategyTemplates,
+  removeRobot,
   runAnalysis,
+  runRobotsOnce,
   runSchedulerOnce,
   sendSignal,
+  startRobot,
   startScheduler,
+  stopRobot,
   stopScheduler,
+  type CompiledStrategy,
   type MarketPrice,
   type Mt5Signal,
   type SchedulerStatus,
+  type StrategyRobot,
+  type StrategyTemplate,
   type SystemStatus,
 } from "./api";
 
@@ -108,25 +119,6 @@ const TEMPLATES = [
   { value: "technical", label: "技术分析" },
 ];
 
-const STRATEGY_PROMPTS = [
-  {
-    title: "黄金短线观察",
-    prompt: "帮我看黄金，日内短线，优先模拟盘，回调到支撑附近能不能做多，止损不要太大",
-  },
-  {
-    title: "BTC 震荡策略",
-    prompt: "帮我看 BTC，偏震荡思路，先不要实盘，给我一个适合模拟盘观察的区间和风险提醒",
-  },
-  {
-    title: "ETH 趋势跟随",
-    prompt: "帮我看 ETH，如果趋势继续走强，模拟盘能不能顺势做多，给出止损止盈建议",
-  },
-  {
-    title: "白银波段研究",
-    prompt: "帮我看白银，偏波段，先分析方向和关键位置，不自动交易，只给模拟盘方案",
-  },
-];
-
 const NAV_ITEMS: Array<{ id: PageId; label: string; icon: Icon }> = [
   { id: "workspace", label: "交易工作台", icon: LayoutDashboard },
   { id: "analysis", label: "AI 分析", icon: Brain },
@@ -167,6 +159,49 @@ function actionClass(action?: string) {
   if (action === "BUY") return "text-emerald-700 bg-emerald-50 border-emerald-200";
   if (action === "SELL") return "text-red-700 bg-red-50 border-red-200";
   return "text-neutral-600 bg-neutral-100 border-neutral-200";
+}
+
+function strategyTypeText(type?: string) {
+  const names: Record<string, string> = {
+    breakout: "突破",
+    breakdown: "跌破",
+    pullback: "回调",
+    grid: "网格",
+    dca: "分批",
+    trend_following: "趋势跟随",
+    rsi_reversal: "RSI 反转",
+    observe: "只观察",
+    discretionary: "自定义",
+  };
+  return names[type || ""] || type || "--";
+}
+
+function strategyStatusText(status?: string) {
+  if (status === "ready") return "可模拟";
+  if (status === "needs_confirmation") return "待补参数";
+  if (status === "observe_only") return "只观察";
+  return status || "--";
+}
+
+function riskText(level?: unknown) {
+  if (level === "low") return "低";
+  if (level === "high") return "高";
+  if (level === "medium") return "中";
+  return String(level || "--");
+}
+
+function robotStatusText(status?: string) {
+  if (status === "running") return "运行中";
+  if (status === "triggered") return "已触发";
+  if (status === "stopped") return "已停止";
+  return status || "--";
+}
+
+function robotStatusClass(status?: string) {
+  if (status === "running") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (status === "triggered") return "border-amber-200 bg-amber-50 text-amber-700";
+  if (status === "stopped") return "border-neutral-200 bg-neutral-100 text-neutral-600";
+  return "border-neutral-200 bg-neutral-50 text-neutral-600";
 }
 
 function clampReport(text: string) {
@@ -232,6 +267,11 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [strategyPrompt, setStrategyPrompt] = useState("帮我看黄金，偏短线，优先模拟盘，看看能不能做多");
   const [strategyDraft, setStrategyDraft] = useState<StrategyDraft | null>(null);
+  const [strategyTemplates, setStrategyTemplates] = useState<StrategyTemplate[]>([]);
+  const [compiledStrategy, setCompiledStrategy] = useState<CompiledStrategy | null>(null);
+  const [robots, setRobots] = useState<StrategyRobot[]>([]);
+  const [robotBusy, setRobotBusy] = useState(false);
+  const [robotMessage, setRobotMessage] = useState("");
   const [sigSymbol, setSigSymbol] = useState("GOLD");
   const [sigAction, setSigAction] = useState("BUY");
   const [sigVolume, setSigVolume] = useState("0.10");
@@ -248,17 +288,21 @@ export default function App() {
   const refreshTimer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
   const loadAll = useCallback(async () => {
-    const [statusResult, signalResult, reportsResult, schedulerResult] = await Promise.allSettled([
+    const [statusResult, signalResult, reportsResult, schedulerResult, templatesResult, robotsResult] = await Promise.allSettled([
       fetchStatus(),
       fetchCurrentSignal(),
       fetchReports(12),
       fetchSchedulerStatus(),
+      fetchStrategyTemplates(),
+      fetchRobotsStatus(),
     ]);
 
     if (statusResult.status === "fulfilled") setStatus(statusResult.value);
     if (signalResult.status === "fulfilled") setSignal(signalResult.value);
     if (reportsResult.status === "fulfilled") setReports((reportsResult.value.reports || []) as ReportItem[]);
     if (schedulerResult.status === "fulfilled") setScheduler(schedulerResult.value);
+    if (templatesResult.status === "fulfilled") setStrategyTemplates(templatesResult.value.templates || []);
+    if (robotsResult.status === "fulfilled") setRobots(robotsResult.value.robots || []);
 
     const quoteEntries = await Promise.all(
       WATCHLIST.map(async (item) => [item.symbol, await fetchPrice(item.symbol)] as const),
@@ -316,21 +360,130 @@ export default function App() {
     setPage("analysis");
   };
 
-  const handleStrategyPrompt = async () => {
-    const draft = parseNaturalStrategy(strategyPrompt);
-    setStrategyDraft(draft);
-    setSymbol(draft.symbol);
-    setChartSymbol(draft.symbol);
-    setTemplate(draft.template);
-    setSigSymbol(draft.symbol);
-    setSigAction(draft.action);
-    setSigVolume(draft.volume);
-    setSigSl(draft.sl);
-    setSigTp(draft.tp);
+  const applyCompiledStrategy = (strategy: CompiledStrategy) => {
+    const targetTemplate = strategy.symbol.market === "CRYPTO" ? "crypto_basic" : strategy.strategy_type === "trend_following" ? "technical" : "basic";
+    const stopLoss = strategy.exit.stop_loss;
+    const takeProfit = strategy.exit.take_profit;
+    const riskLevel = typeof strategy.risk.level === "string" ? strategy.risk.level : "medium";
+    setCompiledStrategy(strategy);
+    setStrategyDraft({
+      symbol: strategy.symbol.raw,
+      template: targetTemplate,
+      action: strategy.action,
+      volume: String(strategy.volume || 0.1),
+      sl: String(stopLoss || ""),
+      tp: String(takeProfit || ""),
+      horizon: strategy.timeframe,
+      risk: riskText(riskLevel),
+      intent: strategy.prompt,
+      summary: strategy.explain.join(" "),
+      checklist: [
+        `标的：${strategy.symbol.raw}`,
+        `方向：${actionText(strategy.action)}`,
+        `类型：${strategyTypeText(strategy.strategy_type)}`,
+        `状态：${strategyStatusText(strategy.status)}`,
+      ],
+    });
+    setSymbol(strategy.symbol.raw);
+    setChartSymbol(strategy.symbol.raw);
+    setTemplate(targetTemplate);
+    setSigSymbol(strategy.symbol.raw);
+    setSigAction(strategy.action);
+    setSigVolume(String(strategy.volume || 0.1));
+    setSigSl(String(stopLoss || ""));
+    setSigTp(String(takeProfit || ""));
     setSigMode("DEMO");
     setSigAuto(false);
-    setAutoSignal(true);
-    await handleAnalyze(draft.symbol, draft.template);
+    setAutoSignal(false);
+  };
+
+  const handleStrategyPrompt = async () => {
+    setAnalysisError("");
+    setRobotMessage("");
+    const fallbackDraft = parseNaturalStrategy(strategyPrompt);
+    setStrategyDraft(fallbackDraft);
+    try {
+      const compiled = await compileStrategy({ prompt: strategyPrompt });
+      applyCompiledStrategy(compiled.strategy);
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : String(error));
+      setCompiledStrategy(null);
+      setSymbol(fallbackDraft.symbol);
+      setChartSymbol(fallbackDraft.symbol);
+      setTemplate(fallbackDraft.template);
+      setSigSymbol(fallbackDraft.symbol);
+      setSigAction(fallbackDraft.action);
+      setSigVolume(fallbackDraft.volume);
+      setSigSl(fallbackDraft.sl);
+      setSigTp(fallbackDraft.tp);
+    }
+  };
+
+  const handleTemplateCompile = async (templateId: string) => {
+    const templateItem = strategyTemplates.find((item) => item.id === templateId);
+    if (templateItem) setStrategyPrompt(templateItem.prompt);
+    setAnalysisError("");
+    setRobotMessage("");
+    try {
+      const compiled = await compileStrategy({ template_id: templateId });
+      applyCompiledStrategy(compiled.strategy);
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleStartRobot = async () => {
+    if (!compiledStrategy) {
+      setRobotMessage("请先生成策略 JSON。");
+      return;
+    }
+    setRobotBusy(true);
+    setRobotMessage("");
+    try {
+      const robot = await startRobot(compiledStrategy);
+      setRobots((current) => [robot, ...current.filter((item) => item.id !== robot.id)]);
+      setRobotMessage(`${robot.name} 已启动模拟观察。`);
+      void loadAll();
+    } catch (error) {
+      setRobotMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRobotBusy(false);
+    }
+  };
+
+  const handleRunRobotsOnce = async (robotId?: string) => {
+    setRobotBusy(true);
+    setRobotMessage("");
+    try {
+      const result = await runRobotsOnce(robotId);
+      setRobots(result.robots || []);
+      setRobotMessage(result.runs?.[0]?.message || "已执行一次模拟观察。");
+      void loadAll();
+    } catch (error) {
+      setRobotMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRobotBusy(false);
+    }
+  };
+
+  const handleStopRobot = async (robotId: string) => {
+    setRobotBusy(true);
+    try {
+      const robot = await stopRobot(robotId);
+      setRobots((current) => current.map((item) => (item.id === robot.id ? robot : item)));
+    } finally {
+      setRobotBusy(false);
+    }
+  };
+
+  const handleRemoveRobot = async (robotId: string) => {
+    setRobotBusy(true);
+    try {
+      await removeRobot(robotId);
+      setRobots((current) => current.filter((item) => item.id !== robotId));
+    } finally {
+      setRobotBusy(false);
+    }
   };
 
   const handleUseAnalysisSignal = () => {
@@ -417,13 +570,24 @@ export default function App() {
                 avgChange={avgChange}
                 analysisResult={analysisResult}
                 analyzing={analyzing}
+                analysisError={analysisError}
                 strategyPrompt={strategyPrompt}
                 strategyDraft={strategyDraft}
+                strategyTemplates={strategyTemplates}
+                compiledStrategy={compiledStrategy}
+                robots={robots}
+                robotBusy={robotBusy}
+                robotMessage={robotMessage}
                 setStrategyPrompt={setStrategyPrompt}
                 onChartSymbolChange={setChartSymbol}
                 onAnalyzeSymbol={handleAnalyzeSymbol}
                 onQuickAnalyze={(nextSymbol) => void handleAnalyze(nextSymbol)}
                 onStrategyPrompt={() => void handleStrategyPrompt()}
+                onTemplateCompile={(templateId) => void handleTemplateCompile(templateId)}
+                onStartRobot={() => void handleStartRobot()}
+                onRunRobotsOnce={(robotId) => void handleRunRobotsOnce(robotId)}
+                onStopRobot={(robotId) => void handleStopRobot(robotId)}
+                onRemoveRobot={(robotId) => void handleRemoveRobot(robotId)}
                 onUseAnalysisSignal={handleUseAnalysisSignal}
                 onOpenAnalysis={() => setPage("analysis")}
                 onOpenSignals={() => setPage("signals")}
@@ -641,14 +805,25 @@ function WorkspacePage({
   avgChange,
   analysisResult,
   analyzing,
+  analysisError,
   strategyPrompt,
   strategyDraft,
+  strategyTemplates,
+  compiledStrategy,
+  robots,
+  robotBusy,
+  robotMessage,
   orderTicket,
   setStrategyPrompt,
   onChartSymbolChange,
   onAnalyzeSymbol,
   onQuickAnalyze,
   onStrategyPrompt,
+  onTemplateCompile,
+  onStartRobot,
+  onRunRobotsOnce,
+  onStopRobot,
+  onRemoveRobot,
   onUseAnalysisSignal,
   onOpenAnalysis,
   onOpenSignals,
@@ -664,14 +839,25 @@ function WorkspacePage({
   avgChange: number;
   analysisResult: AnalysisResult | null;
   analyzing: boolean;
+  analysisError: string;
   strategyPrompt: string;
   strategyDraft: StrategyDraft | null;
+  strategyTemplates: StrategyTemplate[];
+  compiledStrategy: CompiledStrategy | null;
+  robots: StrategyRobot[];
+  robotBusy: boolean;
+  robotMessage: string;
   orderTicket: ReactNode;
   setStrategyPrompt: (value: string) => void;
   onChartSymbolChange: (symbol: string) => void;
   onAnalyzeSymbol: (symbol: string) => void;
   onQuickAnalyze: (symbol: string) => void;
   onStrategyPrompt: () => void;
+  onTemplateCompile: (templateId: string) => void;
+  onStartRobot: () => void;
+  onRunRobotsOnce: (robotId?: string) => void;
+  onStopRobot: (robotId: string) => void;
+  onRemoveRobot: (robotId: string) => void;
   onUseAnalysisSignal: () => void;
   onOpenAnalysis: () => void;
   onOpenSignals: () => void;
@@ -686,15 +872,30 @@ function WorkspacePage({
         activeSignal={activeSignal}
         analysisResult={analysisResult}
         analyzing={analyzing}
+        analysisError={analysisError}
         strategyPrompt={strategyPrompt}
         strategyDraft={strategyDraft}
+        strategyTemplates={strategyTemplates}
+        compiledStrategy={compiledStrategy}
+        robotBusy={robotBusy}
         setStrategyPrompt={setStrategyPrompt}
         onQuickAnalyze={onQuickAnalyze}
         onStrategyPrompt={onStrategyPrompt}
+        onTemplateCompile={onTemplateCompile}
+        onStartRobot={onStartRobot}
         onUseAnalysisSignal={onUseAnalysisSignal}
         onOpenAnalysis={onOpenAnalysis}
         onOpenSignals={onOpenSignals}
         onOpenAutomation={onOpenAutomation}
+      />
+
+      <DemoRobotPanel
+        robots={robots}
+        busy={robotBusy}
+        message={robotMessage}
+        onRunOnce={onRunRobotsOnce}
+        onStop={onStopRobot}
+        onRemove={onRemoveRobot}
       />
 
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-4">
@@ -737,11 +938,17 @@ function SmartPilot({
   activeSignal,
   analysisResult,
   analyzing,
+  analysisError,
   strategyPrompt,
   strategyDraft,
+  strategyTemplates,
+  compiledStrategy,
+  robotBusy,
   setStrategyPrompt,
   onQuickAnalyze,
   onStrategyPrompt,
+  onTemplateCompile,
+  onStartRobot,
   onUseAnalysisSignal,
   onOpenAnalysis,
   onOpenSignals,
@@ -752,11 +959,17 @@ function SmartPilot({
   activeSignal: Mt5Signal | null;
   analysisResult: AnalysisResult | null;
   analyzing: boolean;
+  analysisError: string;
   strategyPrompt: string;
   strategyDraft: StrategyDraft | null;
+  strategyTemplates: StrategyTemplate[];
+  compiledStrategy: CompiledStrategy | null;
+  robotBusy: boolean;
   setStrategyPrompt: (value: string) => void;
   onQuickAnalyze: (symbol: string) => void;
   onStrategyPrompt: () => void;
+  onTemplateCompile: (templateId: string) => void;
+  onStartRobot: () => void;
   onUseAnalysisSignal: () => void;
   onOpenAnalysis: () => void;
   onOpenSignals: () => void;
@@ -766,74 +979,49 @@ function SmartPilot({
   const backendReady = !!status?.healthy;
   const modelReady = !!status?.model && status.model !== "未配置";
 
-  let title = "先生成一份模拟盘策略草案";
-  let detail = "当前支持从一句话或模板整理标的、方向、周期和风控，再调用 AI 做行情分析；完整自然语言策略编译还在后端待接入。";
-  let actionLabel = "一键分析 GOLD";
-  let actionIcon: Icon = Brain;
-  let disabled = analyzing || !backendReady;
-  let action = () => onQuickAnalyze("GOLD");
+  const title = !backendReady
+    ? "后端未连接，先恢复本地服务"
+    : compiledStrategy
+      ? `已生成策略 JSON：${compiledStrategy.name}`
+      : "从一句话生成可运行策略 JSON";
+  const detail = compiledStrategy
+    ? `${compiledStrategy.symbol.raw} · ${strategyTypeText(compiledStrategy.strategy_type)} · ${strategyStatusText(compiledStrategy.status)}。下一步可以调用 AI 分析，或直接启动模拟机器人观察触发条件。`
+    : "当前是模板 + 规则编译器，不假装已经是完全自由自然语言 AI；先把小白常用策略变成可复核、可运行的 JSON。";
 
-  if (!backendReady) {
-    title = "后端未连接";
-    detail = "服务恢复后才能获取行情、调用模型和发送 MT5 信号。";
-    actionLabel = "刷新状态";
-    actionIcon = RefreshCw;
-    disabled = true;
-  } else if (!modelReady) {
-    title = "模型未配置";
-    detail = "模型就绪后，AI 才能输出可复核的交易计划。";
-    actionLabel = "查看配置";
-    actionIcon = Settings;
-    disabled = false;
-    action = onOpenAutomation;
-  } else if (analyzing) {
-    title = "AI 正在生成计划";
-    detail = "行情、趋势、风险和交易参数正在汇总。";
-    actionLabel = "分析中";
-    actionIcon = RefreshCw;
-    disabled = true;
-  } else if (draft && !activeSignal) {
-    title = `AI 建议：${actionText(draft.action)}`;
-    detail = `信心 ${draft.confidence ?? "--"}%，手数 ${draft.volume ?? "--"}，SL ${draft.sl ?? "--"}，TP ${draft.tp ?? "--"}。`;
-    actionLabel = "套用到模拟盘";
-    actionIcon = Send;
-    disabled = false;
-    action = onUseAnalysisSignal;
-  } else if (activeSignal) {
-    title = `当前信号：${actionText(activeSignal.action)} ${activeSignal.symbol}`;
-    detail = `等待 MT5 桥接读取，模式 ${activeSignal.trade_mode}，过期 ${fmtShortTime(activeSignal.expires_at)}。`;
-    actionLabel = "查看信号";
-    actionIcon = Radio;
-    disabled = false;
-    action = onOpenSignals;
-  }
-
-  const ActionIcon = actionIcon;
-  const strategyDisabled = analyzing || !backendReady || !modelReady || !strategyPrompt.trim();
+  const strategyDisabled = !backendReady || !strategyPrompt.trim();
+  const aiAnalyzeDisabled = analyzing || !backendReady || !modelReady || !compiledStrategy;
+  const robotDisabled = robotBusy || !backendReady || !compiledStrategy;
+  const visibleTemplates = strategyTemplates.slice(0, 8);
 
   return (
     <section className="rounded-md border border-neutral-200 bg-white p-4">
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_430px]">
         <div className="flex items-start gap-4">
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-neutral-950 text-white">
             <Bot size={21} />
           </div>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base font-semibold text-neutral-950">策略草案助手</h2>
+              <h2 className="text-base font-semibold text-neutral-950">AI 自动交易三步入口</h2>
               <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">小白入口</span>
-              <span className="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-xs text-neutral-600">模拟盘优先</span>
-              <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">规则解析 + AI 分析</span>
+              <span className="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-xs text-neutral-600">模板库</span>
+              <span className="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-xs text-neutral-600">策略 JSON</span>
+              <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-700">机器人只跑 DEMO</span>
             </div>
             <div className="mt-3 text-xl font-semibold text-neutral-950">{title}</div>
             <div className="mt-1 max-w-3xl text-sm leading-6 text-neutral-600">{detail}</div>
+            <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <PilotCheckpoint icon={backendReady ? CheckCircle2 : AlertTriangle} label="后端" value={backendReady ? "正常" : "异常"} ok={backendReady} />
+              <PilotCheckpoint icon={compiledStrategy ? CheckCircle2 : FileText} label="策略 JSON" value={compiledStrategy ? strategyStatusText(compiledStrategy.status) : "待生成"} ok={!!compiledStrategy} />
+              <PilotCheckpoint icon={modelReady ? Brain : Settings} label="AI 分析" value={modelReady ? "可用" : "未配置"} ok={modelReady} />
+            </div>
             <div className="mt-4 rounded-md border border-neutral-200 bg-[#f7f7f4] p-3">
               <textarea
                 value={strategyPrompt}
                 onChange={(event) => setStrategyPrompt(event.target.value)}
                 rows={3}
                 className="w-full resize-none bg-transparent text-sm leading-6 text-neutral-900 outline-none placeholder:text-neutral-400"
-                placeholder="例如：帮我看黄金，日内短线，回调到支撑能不能模拟盘做多，止损不要太大"
+                placeholder="例如：黄金 H1 突破 4200 后模拟盘做多，止损 4170，止盈 4260，0.1 手"
               />
               {strategyDraft && (
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -844,14 +1032,28 @@ function SmartPilot({
               )}
             </div>
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-              {STRATEGY_PROMPTS.map((item) => (
+              {visibleTemplates.length === 0 && (
+                <div className="col-span-full rounded-md border border-dashed border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-500">
+                  模板库等待后端返回。你仍可先用上面的自然语言编译。
+                </div>
+              )}
+              {visibleTemplates.map((item) => (
                 <button
-                  key={item.title}
-                  onClick={() => setStrategyPrompt(item.prompt)}
+                  key={item.id}
+                  onClick={() => onTemplateCompile(item.id)}
+                  disabled={!backendReady}
                   className="rounded-md border border-neutral-200 bg-white px-3 py-2 text-left hover:border-neutral-400 hover:bg-neutral-50"
                 >
-                  <div className="text-xs font-semibold text-neutral-900">{item.title}</div>
-                  <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-neutral-500">{item.prompt}</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="truncate text-xs font-semibold text-neutral-900">{item.name}</div>
+                    <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-500">{item.category}</span>
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-[11px] leading-4 text-neutral-500">{item.description}</div>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {[strategyTypeText(item.default_type), item.default_timeframe, ...item.tags.slice(0, 2)].map((tag, index) => (
+                      <span key={`${item.id}-${tag}-${index}`} className="rounded bg-neutral-50 px-1.5 py-0.5 text-[10px] text-neutral-500">{tag}</span>
+                    ))}
+                  </div>
                 </button>
               ))}
             </div>
@@ -861,35 +1063,131 @@ function SmartPilot({
                 disabled={strategyDisabled}
                 className="flex h-10 items-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <Bot size={16} className={analyzing ? "animate-spin" : ""} />
-                生成草案并分析
+                <Bot size={16} />
+                编译策略 JSON
               </button>
               <button
-                onClick={action}
-                disabled={disabled}
+                onClick={() => compiledStrategy && onQuickAnalyze(compiledStrategy.symbol.raw)}
+                disabled={aiAnalyzeDisabled}
                 className="flex h-10 items-center gap-2 rounded-md border border-neutral-200 px-3 text-sm font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <ActionIcon size={16} className={analyzing ? "animate-spin" : ""} />
-                {actionLabel}
+                <Brain size={16} className={analyzing ? "animate-spin" : ""} />
+                {analyzing ? "AI 分析中" : modelReady ? "AI 分析行情" : "模型未配置"}
               </button>
+              <button
+                onClick={onStartRobot}
+                disabled={robotDisabled}
+                className="flex h-10 items-center gap-2 rounded-md bg-neutral-950 px-4 text-sm font-semibold text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Play size={15} />
+                启动模拟机器人
+              </button>
+              {draft && !activeSignal && (
+                <button onClick={onUseAnalysisSignal} className="flex h-10 items-center gap-2 rounded-md border border-neutral-200 px-3 text-sm font-medium text-neutral-700 hover:bg-neutral-50">
+                  <Send size={15} />
+                  套用 AI 信号
+                </button>
+              )}
               <button onClick={onOpenAnalysis} className="flex h-10 items-center gap-2 rounded-md border border-neutral-200 px-3 text-sm font-medium text-neutral-700 hover:bg-neutral-50">
-                <Brain size={15} />
-                自选标的
+                <BarChart3 size={15} />
+                进入 AI 分析
               </button>
               <button onClick={onOpenAutomation} className="flex h-10 items-center gap-2 rounded-md border border-neutral-200 px-3 text-sm font-medium text-neutral-700 hover:bg-neutral-50">
                 <Clock3 size={15} />
                 自动巡检
               </button>
+              {activeSignal && (
+                <button onClick={onOpenSignals} className="flex h-10 items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 text-sm font-medium text-amber-700 hover:bg-amber-100">
+                  <Radio size={15} />
+                  查看当前信号
+                </button>
+              )}
             </div>
+            {analysisError && <AlertBox message={analysisError} />}
           </div>
         </div>
-        <div className="grid grid-cols-3 gap-2 xl:grid-cols-1">
-          <PilotCheckpoint icon={backendReady ? CheckCircle2 : AlertTriangle} label="连接" value={backendReady ? "正常" : "异常"} ok={backendReady} />
-          <PilotCheckpoint icon={draft ? CheckCircle2 : Brain} label="AI计划" value={draft ? actionText(draft.action) : "待生成"} ok={!!draft} />
-          <PilotCheckpoint icon={activeSignal ? CheckCircle2 : ShieldCheck} label="执行" value={activeSignal ? "已发送" : scheduler?.running ? "巡检中" : "待确认"} ok={!!activeSignal || !!scheduler?.running} />
-        </div>
+        <StrategyJsonCard strategy={compiledStrategy} scheduler={scheduler} activeSignal={activeSignal} onStartRobot={onStartRobot} busy={robotBusy} />
       </div>
     </section>
+  );
+}
+
+function StrategyJsonCard({
+  strategy,
+  scheduler,
+  activeSignal,
+  onStartRobot,
+  busy,
+}: {
+  strategy: CompiledStrategy | null;
+  scheduler: SchedulerStatus | null;
+  activeSignal: Mt5Signal | null;
+  onStartRobot: () => void;
+  busy: boolean;
+}) {
+  if (!strategy) {
+    return (
+      <div className="rounded-md border border-neutral-200 bg-[#f7f7f4] p-4">
+        <SectionTitle icon={FileText} title="策略 JSON 编译结果" />
+        <EmptyState title="等待编译" detail="选择模板或输入一句话后，这里会显示机器可读的策略 JSON。" />
+        <div className="mt-4 grid grid-cols-1 gap-2">
+          <PilotCheckpoint icon={ShieldCheck} label="安全边界" value="默认模拟盘" ok />
+          <PilotCheckpoint icon={Clock3} label="调度" value={scheduler?.running ? "自动巡检中" : "手动触发"} ok={!!scheduler?.running} />
+          <PilotCheckpoint icon={Radio} label="当前信号" value={activeSignal ? `${actionText(activeSignal.action)} ${activeSignal.symbol}` : "暂无"} ok={!!activeSignal} />
+        </div>
+      </div>
+    );
+  }
+
+  const warnings = [...strategy.missing_fields.map((item) => `缺少 ${item}`), ...strategy.warnings];
+  return (
+    <div className="rounded-md border border-neutral-200 bg-[#f7f7f4] p-4">
+      <div className="flex items-start justify-between gap-3">
+        <SectionTitle icon={FileText} title="策略 JSON 编译结果" />
+        <span className={cx("rounded-md border px-2 py-1 text-xs font-medium", strategy.status === "ready" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700")}>
+          {strategyStatusText(strategy.status)}
+        </span>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <StrategyMeta label="标的" value={strategy.symbol.raw} />
+        <StrategyMeta label="方向" value={actionText(strategy.action)} />
+        <StrategyMeta label="类型" value={strategyTypeText(strategy.strategy_type)} />
+        <StrategyMeta label="周期" value={strategy.timeframe} />
+        <StrategyMeta label="手数" value={String(strategy.volume)} />
+        <StrategyMeta label="风险" value={riskText(strategy.risk.level)} />
+      </div>
+      <div className="mt-3 rounded-md border border-neutral-200 bg-white p-3 text-xs leading-5 text-neutral-600">
+        <div className="font-semibold text-neutral-900">入场规则</div>
+        <div className="mt-1 font-mono">{JSON.stringify(strategy.entry)}</div>
+        <div className="mt-3 font-semibold text-neutral-900">退出规则</div>
+        <div className="mt-1">SL {String(strategy.exit.stop_loss || "--")} / TP {String(strategy.exit.take_profit || "--")}</div>
+      </div>
+      {warnings.length > 0 && (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+          {warnings.slice(0, 3).map((item) => <div key={item}>• {item}</div>)}
+        </div>
+      )}
+      <pre className="mt-3 max-h-52 overflow-auto whitespace-pre-wrap rounded-md bg-neutral-950 p-3 text-[11px] leading-5 text-neutral-100">
+        {JSON.stringify(strategy, null, 2)}
+      </pre>
+      <button
+        onClick={onStartRobot}
+        disabled={busy}
+        className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-md bg-neutral-950 text-sm font-semibold text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Play size={15} />
+        {busy ? "处理中" : "用此策略启动模拟机器人"}
+      </button>
+    </div>
+  );
+}
+
+function StrategyMeta({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="rounded-md border border-neutral-200 bg-white p-2">
+      <div className="text-[11px] text-neutral-500">{label}</div>
+      <div className="mt-1 truncate text-xs font-semibold text-neutral-900">{value}</div>
+    </div>
   );
 }
 
@@ -902,6 +1200,120 @@ function PilotCheckpoint({ icon: IconComponent, label, value, ok }: { icon: Icon
       </div>
       <div className="mt-1 truncate text-sm font-semibold text-neutral-900">{value}</div>
     </div>
+  );
+}
+
+function DemoRobotPanel({
+  robots,
+  busy,
+  message,
+  onRunOnce,
+  onStop,
+  onRemove,
+}: {
+  robots: StrategyRobot[];
+  busy: boolean;
+  message: string;
+  onRunOnce: (robotId?: string) => void;
+  onStop: (robotId: string) => void;
+  onRemove: (robotId: string) => void;
+}) {
+  const runningCount = robots.filter((robot) => robot.status === "running").length;
+  const signalCount = robots.reduce((sum, robot) => sum + robot.signal_count, 0);
+
+  return (
+    <section className="rounded-md border border-neutral-200 bg-white p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <SectionTitle icon={Bot} title="模拟盘机器人运行面板" />
+          <div className="mt-2 text-sm leading-6 text-neutral-600">
+            机器人只做 DEMO 观察：读取行情、判断触发条件、写入模拟盘 MT5 信号，不会自动实盘下单。
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">运行 {runningCount}</span>
+          <span className="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-xs text-neutral-600">信号 {signalCount}</span>
+          <button
+            onClick={() => onRunOnce()}
+            disabled={busy || runningCount === 0}
+            className="flex h-8 items-center gap-1.5 rounded-md bg-neutral-950 px-3 text-xs font-semibold text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Zap size={14} />
+            全部执行一次
+          </button>
+        </div>
+      </div>
+
+      {message && <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{message}</div>}
+      {robots.length === 0 && <EmptyState title="暂无模拟机器人" detail="先从上方模板或自然语言生成策略 JSON，然后点击“启动模拟机器人”。" />}
+
+      {robots.length > 0 && (
+        <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2">
+          {robots.map((robot) => {
+            const strategy = robot.strategy;
+            const latestEvent = robot.events?.[robot.events.length - 1];
+            const symbol = strategy.symbol?.raw || strategy.symbol?.canonical || "--";
+            return (
+              <div key={robot.id} className="rounded-md border border-neutral-200 bg-[#f7f7f4] p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="truncate text-sm font-semibold text-neutral-950">{robot.name}</div>
+                      <span className={cx("rounded-md border px-2 py-0.5 text-[11px] font-medium", robotStatusClass(robot.status))}>{robotStatusText(robot.status)}</span>
+                      <span className="rounded-md border border-neutral-200 bg-white px-2 py-0.5 text-[11px] text-neutral-500">{robot.mode}</span>
+                    </div>
+                    <div className="mt-1 text-xs text-neutral-500">
+                      {symbol} · {strategyTypeText(strategy.strategy_type)} · {strategy.timeframe} · {actionText(strategy.action)}
+                    </div>
+                  </div>
+                  <div className="text-right text-xs text-neutral-500">
+                    <div>运行 {robot.run_count}</div>
+                    <div>信号 {robot.signal_count}</div>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  <StatusBox label="最新价" value={robot.last_price ? fmtPrice(robot.last_price) : "--"} ok={robot.last_price > 0} />
+                  <StatusBox label="动作" value={actionText(robot.last_action)} ok={robot.last_action !== "WAIT"} />
+                  <StatusBox label="更新" value={fmtShortTime(robot.updated_at)} ok />
+                </div>
+                {latestEvent && (
+                  <div className="mt-3 rounded-md border border-neutral-200 bg-white p-3 text-xs leading-5 text-neutral-600">
+                    <div className="font-semibold text-neutral-900">{fmtShortTime(latestEvent.time)} · {latestEvent.type}</div>
+                    <div className="mt-1">{latestEvent.message}</div>
+                  </div>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => onRunOnce(robot.id)}
+                    disabled={busy || robot.status !== "running"}
+                    className="flex h-8 items-center gap-1.5 rounded-md border border-neutral-200 bg-white px-3 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Zap size={14} />
+                    执行一次
+                  </button>
+                  <button
+                    onClick={() => onStop(robot.id)}
+                    disabled={busy || robot.status !== "running"}
+                    className="flex h-8 items-center gap-1.5 rounded-md border border-neutral-200 bg-white px-3 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Pause size={14} />
+                    停止
+                  </button>
+                  <button
+                    onClick={() => onRemove(robot.id)}
+                    disabled={busy}
+                    className="flex h-8 items-center gap-1.5 rounded-md border border-red-200 bg-white px-3 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trash2 size={14} />
+                    删除
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 

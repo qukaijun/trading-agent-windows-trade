@@ -4,11 +4,13 @@ React + Vite trading workbench for the local TradingAgents trade edition.
 
 ## What It Provides
 
-- Beginner-friendly strategy draft assistant
+- Beginner-friendly strategy template library
+- Natural-language to strategy JSON compiler
 - Gold, silver, BTC, and ETH watchlist
-- K-line chart view with `lightweight-charts`
+- TradingView iframe K-line chart view
 - AI analysis result review
 - MT5 signal sending panel
+- Demo robot run panel
 - Scheduler status and controls
 
 ## Development
@@ -30,4 +32,4 @@ npm run build
 
 - The UI defaults to demo-mode workflows.
 - Live trading must be explicitly enabled by the backend configuration.
-- Natural-language input currently creates a structured strategy draft; a full strategy compiler backend is future work.
+- Natural-language input currently uses a template + rules compiler; a fully free-form AI strategy compiler is future work.
