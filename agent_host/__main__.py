@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -19,6 +19,9 @@ def main() -> None:
         port=args.port,
         reload=False,
         app_dir=str(root),
+        timeout_keep_alive=1,       # MT5 WebRequest 不兼容长连接
+        limit_concurrency=10,       # 限制并发
+        log_level="warning",
     )
 
 

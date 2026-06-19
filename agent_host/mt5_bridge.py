@@ -110,6 +110,7 @@ def save_signal(
         json.dumps(signal.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    _write_mt5_file(signal)
     return signal
 
 
@@ -154,6 +155,30 @@ def _normalize_trade_mode(value: str) -> TradeMode:
     if mode in {"LIVE", "REAL"}:
         return "LIVE"
     return "DEMO"
+
+
+def _write_mt5_file(signal: Mt5Signal) -> None:
+    mt5_files = Path.home() / "AppData" / "Roaming" / "MetaQuotes" / "Terminal"
+    if not mt5_files.exists():
+        return
+    for instance in mt5_files.iterdir():
+        files_dir = instance / "MQL5" / "Files"
+        if files_dir.exists():
+            demo = "1" if signal.trade_mode == "DEMO" else "0"
+            text = (
+                f"id={signal.signal_id}\n"
+                f"symbol={signal.symbol}\n"
+                f"action={signal.action}\n"
+                f"volume={signal.volume}\n"
+                f"sl={signal.sl}\n"
+                f"tp={signal.tp}\n"
+                f"comment={signal.comment}\n"
+                f"demo={demo}\n"
+                f"mode={signal.trade_mode}\n"
+                f"auto={'1' if signal.auto_trade_allowed else '0'}\n"
+            )
+            (files_dir / "ta_signal.txt").write_text(text, encoding="ascii")
+            break
 
 
 def _now_iso() -> str:
