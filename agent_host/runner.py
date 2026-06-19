@@ -70,7 +70,10 @@ def analyze_with_tradingagents(
     roles = _run_role_analysis(symbol, market_snapshot)
     if roles and not any(r.get("status") == "分析失败" for r in roles):
         market_snapshot["roles"] = roles
-    
+
+    # Extract structured trading signal from role analysis
+    trading_signal = _extract_trading_signal(roles, symbol, market_snapshot) if roles else None
+
     report = build_research_report(
         status="ok",
         symbol=symbol,
@@ -89,6 +92,7 @@ def analyze_with_tradingagents(
         "role_progress": market_snapshot.get("roles", []),
         "report": report,
         "saved_report": saved_report,
+        "trading_signal": trading_signal,
     }
 
 
@@ -268,11 +272,11 @@ def _run_role_analysis(symbol: NormalizedSymbol, market_snapshot: dict[str, Any]
     """Run actual LLM analysis for each role using market data."""
     import json, time, urllib.error, urllib.request
     from agent_host.config_manager import resolve_connection_config
-    
+
     config = resolve_connection_config(None)
     if not config.get("api_key"):
         return [{"name": "模型未配置", "status": "跳过", "detail": "请先配置大模型 API Key。"}]
-    
+
     # Role-specific prompts
     market_name_str = {"A": "A股", "HK": "港股", "US": "美股", "CRYPTO": "加密货币", "COMMODITY": "贵金属/商品"}.get(symbol.market, symbol.market)
     data_summary = json.dumps({
@@ -290,7 +294,7 @@ def _run_role_analysis(symbol: NormalizedSymbol, market_snapshot: dict[str, Any]
         {"name": "技术分析师", "key": "technical", "prompt": f"你是技术分析师。基于以下数据做简要分析（150字以内）：\n{data_summary}\n\n请分析：1) 价格趋势判断 2) 成交量暗示的信号 3) 关键支撑/阻力参考。用中文回复，简洁专业。"},
         {"name": "风险分析师", "key": "risk", "prompt": f"你是风险分析师。基于以下数据做简要分析（150字以内）：\n{data_summary}\n\n请分析：1) 当前波动风险 2) 数据缺口带来的不确定性 3) 需要注意的风险因素。用中文回复，简洁专业。"},
     ]
-    
+
     results = []
     for role in roles:
         try:
@@ -315,8 +319,76 @@ def _run_role_analysis(symbol: NormalizedSymbol, market_snapshot: dict[str, Any]
                 results.append({"name": role["name"], "status": "已完成", "detail": content_text.strip()})
         except Exception as e:
             results.append({"name": role["name"], "status": "分析失败", "detail": str(e)[:100]})
-    
+
     return results
+
+
+def _extract_trading_signal(
+    roles: list[dict[str, str]],
+    symbol: NormalizedSymbol,
+    market_snapshot: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Extract structured trading signal from role analysis results using LLM."""
+    import json, urllib.error, urllib.request
+    from agent_host.config_manager import resolve_connection_config
+
+    config = resolve_connection_config(None)
+    if not config.get("api_key"):
+        return None
+
+    role_summaries = "\n".join(
+        f"[{r.get('name', '?')}]: {r.get('detail', '?')}"
+        for r in roles if r.get("status") == "已完成"
+    )
+    if not role_summaries:
+        return None
+
+    price = market_snapshot.get("latest_close") or market_snapshot.get("current_price") or 0
+    prompt = (
+        f"你是一个交易决策师。基于以下多角色分析结果，给出交易信号。\n\n"
+        f"品种: {symbol.display} ({symbol.canonical})\n"
+        f"当前价格: {price}\n"
+        f"市场: {symbol.market}\n\n"
+        f"=== 角色分析 ===\n{role_summaries}\n\n"
+        f"请用JSON格式回复，只返回JSON，不要其他文字：\n"
+        f'{{"action": "BUY"|"SELL"|"WAIT", "confidence": 0-100, '
+        f'"sl": stop_loss_price, "tp": take_profit_price, '
+        f'"volume": 0.01-1.0, "reason": "reason_20_chars"}}'
+    )
+    try:
+        body = {
+            "model": config["model"],
+            "messages": [
+                {"role": "system", "content": "You are a trading decision maker. Reply JSON only, no other text."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 300,
+        }
+        data = json.dumps(body).encode("utf-8")
+        url = f"{config['base_url'].rstrip('/')}/chat/completions"
+        req = urllib.request.Request(url, data=data, headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config['api_key']}",
+        })
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+            content_text = resp_data["choices"][0]["message"]["content"].strip()
+            if "```" in content_text:
+                content_text = content_text.split("```")[1]
+                if content_text.startswith("json"):
+                    content_text = content_text[4:]
+            signal = json.loads(content_text)
+            return {
+                "action": str(signal.get("action", "WAIT")).upper(),
+                "confidence": int(signal.get("confidence", 0)),
+                "sl": float(signal.get("sl", 0) or 0),
+                "tp": float(signal.get("tp", 0) or 0),
+                "volume": float(signal.get("volume", 0.1)),
+                "reason": str(signal.get("reason", ""))[:100],
+            }
+    except Exception:
+        return None
 
 
 def _blocked(

@@ -28,6 +28,17 @@ vendor/
 .env
 mt5_signal.json
 data_source_checks.json
+node_modules/
+*.bak
+
+# One-off local patch/debug helpers
+scripts/add_scheduler.py
+scripts/clean_app*.py
+scripts/debug_server.py
+scripts/fix_*.py
+scripts/patch_*.py
+scripts/remove_startup.py
+scripts/show_analyze.py
 
 # License secrets
 license-secret.txt

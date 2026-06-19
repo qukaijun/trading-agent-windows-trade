@@ -1,10 +1,11 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import os
 
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, Form, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 
 from agent_host.app_meta import APP_VERSION, about_payload
@@ -20,6 +21,7 @@ from agent_host.mt5_bridge import clear_signal, get_signal, save_signal
 from agent_host.report_export import export_filename, export_report_docx, export_report_pdf
 from agent_host.report_store import get_report_markdown, get_report_record, list_report_records
 from agent_host.runner import analyze_with_tradingagents, upstream_status
+from agent_host.scheduler import get_scheduler
 from agent_host.ui import render_home
 
 
@@ -29,6 +31,14 @@ if CONFIG_PATH.exists():
 
 app = FastAPI(title="TradingAgents 中文服务工作台", version=APP_VERSION)
 
+
+@app.on_event("startup")
+async def startup_scheduler():
+    """Auto-start scheduler if configured."""
+    sched = get_scheduler()
+    # Start only if symbols are configured and interval > 0
+    if sched.symbols and sched.interval_minutes > 0:
+        await sched.start()
 
 @app.get("/health")
 def health() -> dict[str, str]:
@@ -187,6 +197,7 @@ def analyze_api(
     date: str | None = None,
     data_source: str = "eodhd",
     report_template: str = "basic",
+    auto_signal: bool = Query(False, description="Auto-send trading signal to MT5 after analysis"),
 ) -> dict[str, object]:
     normalized = normalize_symbol(symbol)
     source_ok, _ = validate_source_for_symbol(normalized, data_source)
@@ -198,7 +209,63 @@ def analyze_api(
             status_code=400,
             detail="当前模型尚未配置，无法生成报告。请先进入模型配置并完成连接测试。",
         )
-    return analyze_with_tradingagents(normalized, date=date, data_source=data_source, report_template=report_template)
+    result = analyze_with_tradingagents(normalized, date=date, data_source=data_source, report_template=report_template)
+
+    # Auto-send trading signal to MT5 if requested
+    if auto_signal and result.get("status") == "ok":
+        ts = result.get("trading_signal")
+        if ts and ts.get("action") in ("BUY", "SELL"):
+            try:
+                save_signal(
+                    symbol=normalized.canonical,
+                    action=ts["action"],
+                    volume=float(ts.get("volume", 0.1)),
+                    sl=float(ts.get("sl", 0) or 0),
+                    tp=float(ts.get("tp", 0) or 0),
+                    comment=f"AI-{ts.get('action', '?')} conf:{ts.get('confidence', 0)}",
+                    ttl_minutes=30,
+                    auto_trade_allowed=True,
+                    trade_mode="DEMO",
+                )
+                result["signal_sent"] = True
+                result["signal_detail"] = ts
+            except HTTPException:
+                result["signal_sent"] = False
+                result["signal_error"] = "Live trading blocked"
+            except Exception as e:
+                result["signal_sent"] = False
+                result["signal_error"] = str(e)[:100]
+        else:
+            result["signal_sent"] = False
+            result["signal_error"] = "AI recommends WAIT"
+
+    return result
+
+
+# ─── Scheduler ────────────────────────────────────────
+@app.get("/api/scheduler/status")
+def scheduler_status_api() -> dict[str, object]:
+    return get_scheduler().status()
+
+
+@app.post("/api/scheduler/start")
+async def scheduler_start_api() -> dict[str, object]:
+    return await get_scheduler().start()
+
+
+@app.post("/api/scheduler/stop")
+async def scheduler_stop_api() -> dict[str, object]:
+    return await get_scheduler().stop()
+
+
+@app.post("/api/scheduler/run-once")
+async def scheduler_run_once_api() -> dict[str, object]:
+    return await get_scheduler().run_once()
+
+
+@app.post("/api/scheduler/config")
+def scheduler_config_api(payload: dict[str, object] = Body(...)) -> dict[str, object]:
+    return get_scheduler().configure(payload)
 
 
 @app.get("/api/mt5/signal")
