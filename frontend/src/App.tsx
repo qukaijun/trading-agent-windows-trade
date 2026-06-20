@@ -204,6 +204,10 @@ function robotStatusClass(status?: string) {
   return "border-neutral-200 bg-neutral-50 text-neutral-600";
 }
 
+function isGuidanceStrategy(strategy?: CompiledStrategy | null) {
+  return strategy?.status === "needs_strategy_input" || strategy?.strategy_type === "assistant_help";
+}
+
 function clampReport(text: string) {
   return text.length > 9000 ? `${text.slice(0, 9000)}\n\n...` : text;
 }
@@ -361,6 +365,25 @@ export default function App() {
   };
 
   const applyCompiledStrategy = (strategy: CompiledStrategy) => {
+    if (isGuidanceStrategy(strategy)) {
+      setCompiledStrategy(strategy);
+      setStrategyDraft({
+        symbol: "待填写",
+        template: "basic",
+        action: "WAIT",
+        volume: "",
+        sl: "",
+        tp: "",
+        horizon: "待填写",
+        risk: "安全",
+        intent: strategy.prompt,
+        summary: "当前输入不是交易策略，先显示新手教学。",
+        checklist: ["先选标的", "再说方向", "补入场条件", "补风控"],
+      });
+      setSigAuto(false);
+      setAutoSignal(false);
+      return;
+    }
     const targetTemplate = strategy.symbol.market === "CRYPTO" ? "crypto_basic" : strategy.strategy_type === "trend_following" ? "technical" : "basic";
     const stopLoss = strategy.exit.stop_loss;
     const takeProfit = strategy.exit.take_profit;
@@ -982,15 +1005,20 @@ function SmartPilot({
   const title = !backendReady
     ? "后端未连接，先恢复本地服务"
     : compiledStrategy
-      ? `已生成策略 JSON：${compiledStrategy.name}`
+      ? isGuidanceStrategy(compiledStrategy)
+        ? "你好，我先教你怎么描述交易策略"
+        : `已生成策略 JSON：${compiledStrategy.name}`
       : "从一句话生成可运行策略 JSON";
   const detail = compiledStrategy
-    ? `${compiledStrategy.symbol.raw} · ${strategyTypeText(compiledStrategy.strategy_type)} · ${strategyStatusText(compiledStrategy.status)}。下一步可以调用 AI 分析，或直接启动模拟机器人观察触发条件。`
+    ? isGuidanceStrategy(compiledStrategy)
+      ? "我还没拿到完整交易想法，所以先给你示例和填写方法；按示例改一句话再发送即可。"
+      : `${compiledStrategy.symbol.raw} · ${strategyTypeText(compiledStrategy.strategy_type)} · ${strategyStatusText(compiledStrategy.status)}。下一步可以调用 AI 分析，或直接启动模拟机器人观察触发条件。`
     : "直接像聊天一样描述策略，助手会先用人话回复，再把它整理成可复核、可运行的策略 JSON。";
 
   const strategyDisabled = !backendReady || !strategyPrompt.trim();
-  const aiAnalyzeDisabled = analyzing || !backendReady || !modelReady || !compiledStrategy;
-  const robotDisabled = robotBusy || !backendReady || !compiledStrategy;
+  const executableStrategy = !!compiledStrategy && !isGuidanceStrategy(compiledStrategy);
+  const aiAnalyzeDisabled = analyzing || !backendReady || !modelReady || !executableStrategy;
+  const robotDisabled = robotBusy || !backendReady || !executableStrategy;
   const visibleTemplates = strategyTemplates.slice(0, 8);
 
   return (
@@ -1012,7 +1040,7 @@ function SmartPilot({
             <div className="mt-1 max-w-3xl text-sm leading-6 text-neutral-600">{detail}</div>
             <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
               <PilotCheckpoint icon={backendReady ? CheckCircle2 : AlertTriangle} label="后端" value={backendReady ? "正常" : "异常"} ok={backendReady} />
-              <PilotCheckpoint icon={compiledStrategy ? CheckCircle2 : FileText} label="策略 JSON" value={compiledStrategy ? strategyStatusText(compiledStrategy.status) : "待生成"} ok={!!compiledStrategy} />
+              <PilotCheckpoint icon={compiledStrategy ? CheckCircle2 : FileText} label="策略 JSON" value={compiledStrategy ? (isGuidanceStrategy(compiledStrategy) ? "需补策略" : strategyStatusText(compiledStrategy.status)) : "待生成"} ok={!!compiledStrategy && !isGuidanceStrategy(compiledStrategy)} />
               <PilotCheckpoint icon={modelReady ? Brain : Settings} label="AI 分析" value={modelReady ? "可用" : "未配置"} ok={modelReady} />
             </div>
             <div className="mt-4 rounded-md border border-neutral-200 bg-[#f7f7f4] p-3">
@@ -1147,6 +1175,28 @@ function StrategyJsonCard({
     );
   }
 
+  if (isGuidanceStrategy(strategy)) {
+    return (
+      <div className="rounded-md border border-blue-200 bg-blue-50 p-4">
+        <SectionTitle icon={Bot} title="等待你的策略描述" />
+        <div className="mt-3 text-sm leading-6 text-blue-900">
+          你刚才输入的是问候或泛泛提问，还不是交易策略。我不会把它硬编译成订单。
+        </div>
+        <div className="mt-4 rounded-md border border-blue-100 bg-white p-3">
+          <div className="text-xs font-semibold text-neutral-900">你可以这样写</div>
+          <div className="mt-2 space-y-2 text-xs leading-5 text-neutral-600">
+            <div>• 黄金 H1 突破 4200 后模拟盘做多，止损 4170，止盈 4260，0.1 手。</div>
+            <div>• BTC 在 60000 到 66000 之间做模拟网格，分 6 格，先不要实盘。</div>
+            <div>• ETH 站上 20 均线后模拟做多，跌破均线退出。</div>
+          </div>
+        </div>
+        <div className="mt-3 rounded-md border border-blue-100 bg-white p-3 text-xs leading-5 text-neutral-500">
+          写清楚 4 件事就行：交易什么、做多还是做空、什么时候进、错了在哪里退出。
+        </div>
+      </div>
+    );
+  }
+
   const warnings = [...strategy.missing_fields.map((item) => `缺少 ${item}`), ...strategy.warnings];
   return (
     <div className="rounded-md border border-neutral-200 bg-[#f7f7f4] p-4">
@@ -1228,6 +1278,43 @@ function AssistantReplyCard({
           你发送后，我会先告诉你：“我理解你要交易什么、方向是什么、什么时候入场、止损止盈在哪里、下一步该点哪个按钮。”
         </div>
         <div className="mt-2 text-xs text-neutral-500">看不懂 JSON 没关系，小白只看这里和下方机器人面板就够了。</div>
+      </div>
+    );
+  }
+
+  if (isGuidanceStrategy(strategy)) {
+    return (
+      <div className="mt-3 overflow-hidden rounded-md border border-blue-200 bg-blue-50">
+        <div className="border-b border-blue-100 bg-white/70 px-3 py-2">
+          <div className="flex items-center gap-2 text-sm font-semibold text-blue-900">
+            <Bot size={16} />
+            助手回复：你好，我可以帮你把一句话变成模拟盘策略
+          </div>
+        </div>
+        <div className="space-y-3 p-3 text-sm leading-6 text-neutral-700">
+          <div>
+            你刚才说的是“{strategy.prompt || "你好"}”，这还不是一个交易策略，所以我不会乱生成 GOLD 订单。你只要按下面这个格式说一句话就可以。
+          </div>
+          <div className="rounded-md border border-blue-100 bg-white p-3">
+            <div className="text-xs font-semibold text-neutral-900">推荐格式</div>
+            <div className="mt-2 text-xs leading-5 text-neutral-600">
+              我想交易 <span className="font-semibold text-neutral-900">标的</span>，
+              如果 <span className="font-semibold text-neutral-900">入场条件</span>，
+              就 <span className="font-semibold text-neutral-900">做多/做空</span>，
+              止损 <span className="font-semibold text-neutral-900">多少</span>，
+              止盈 <span className="font-semibold text-neutral-900">多少</span>，
+              先用 <span className="font-semibold text-neutral-900">模拟盘</span>。
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <StrategyMeta label="黄金例子" value="黄金突破 4200 做多，SL 4170，TP 4260" />
+            <StrategyMeta label="BTC 例子" value="BTC 60000-66000 做模拟网格" />
+            <StrategyMeta label="保守例子" value="先只观察黄金，不发送信号" />
+          </div>
+          <div className="rounded-md border border-blue-100 bg-white p-3 text-xs leading-5 text-neutral-600">
+            下一步：把上面的例子复制改一下，再点“发送给策略助手”。我会再用人话解释，并告诉你能不能启动模拟机器人。
+          </div>
+        </div>
       </div>
     );
   }

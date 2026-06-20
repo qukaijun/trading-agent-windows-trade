@@ -277,7 +277,10 @@ def robots_start_api(payload: dict[str, object] = Body(...)) -> dict[str, object
     strategy = payload.get("strategy")
     if not isinstance(strategy, dict):
         raise HTTPException(status_code=400, detail="缺少 strategy。")
-    return get_robot_manager().start(strategy)
+    try:
+        return get_robot_manager().start(strategy)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/robots/{robot_id}/stop")

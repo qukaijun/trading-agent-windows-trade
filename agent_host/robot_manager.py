@@ -63,6 +63,8 @@ class RobotManager:
         }
 
     def start(self, strategy: dict[str, Any]) -> dict[str, Any]:
+        if strategy.get("status") == "needs_strategy_input" or strategy.get("strategy_type") == "assistant_help":
+            raise ValueError("当前输入还不是可运行策略，请先补全交易标的、入场条件和风控。")
         strategy_id = str(strategy.get("id") or f"stg_{uuid.uuid4().hex[:12]}")
         robot_id = f"bot_{uuid.uuid4().hex[:10]}"
         now = _now()

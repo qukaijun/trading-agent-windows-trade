@@ -177,7 +177,10 @@ def compile_strategy(payload: dict[str, Any]) -> dict[str, Any]:
     if not prompt and template:
         prompt = template.prompt
     if not prompt:
-        prompt = "帮我观察黄金短线机会，只做模拟盘。"
+        prompt = "你好"
+
+    if not template and _is_guidance_prompt(prompt):
+        return {"status": "ok", "strategy": _guidance_strategy(prompt).to_dict()}
 
     merged_text = f"{template.prompt if template else ''}\n{prompt}".strip()
     symbol_text = str(payload.get("symbol") or _detect_symbol(merged_text, template) or "GOLD")
@@ -227,6 +230,88 @@ def compile_strategy(payload: dict[str, Any]) -> dict[str, Any]:
         explain=_explain(symbol.raw, strategy_type, action, entry, exit_rules, mode),
     )
     return {"status": "ok", "strategy": compiled.to_dict()}
+
+
+def _is_guidance_prompt(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text.strip().lower())
+    if not compact:
+        return True
+    greetings = {
+        "你好",
+        "您好",
+        "hello",
+        "hi",
+        "hey",
+        "在吗",
+        "测试",
+        "test",
+        "怎么用",
+        "如何使用",
+        "帮我",
+        "帮助",
+        "说明",
+        "你会什么",
+        "能做什么",
+    }
+    if compact in greetings:
+        return True
+    strategy_signals = (
+        "黄金",
+        "白银",
+        "btc",
+        "eth",
+        "xau",
+        "xag",
+        "比特币",
+        "以太",
+        "做多",
+        "做空",
+        "买",
+        "卖",
+        "突破",
+        "跌破",
+        "回调",
+        "网格",
+        "dca",
+        "rsi",
+        "均线",
+        "趋势",
+        "止损",
+        "止盈",
+        "模拟盘",
+        "实盘",
+        "手",
+        "lot",
+    )
+    has_signal = any(signal in compact for signal in strategy_signals)
+    has_number = bool(re.search(r"\d", compact))
+    return not has_signal and not has_number
+
+
+def _guidance_strategy(prompt: str) -> CompiledStrategy:
+    symbol = normalize_symbol("GOLD")
+    return CompiledStrategy(
+        id=f"guide_{uuid.uuid4().hex[:12]}",
+        name="策略助手入门引导",
+        source="assistant_guide",
+        prompt=prompt,
+        template_id="",
+        status="needs_strategy_input",
+        symbol=symbol.to_dict(),
+        strategy_type="assistant_help",
+        timeframe="",
+        mode="DEMO",
+        action="WAIT",
+        volume=0,
+        entry={"type": "help", "examples": ["黄金 H1 突破 4200 后模拟盘做多，止损 4170，止盈 4260，0.1 手。", "BTC 在 60000 到 66000 之间做模拟网格，分 6 格，先不要实盘。"]},
+        exit={"stop_loss": 0, "take_profit": 0, "trailing_stop": False, "exit_on_opposite_signal": False},
+        risk={"level": "none", "max_volume": 0, "paper_first": True, "requires_sl_tp_before_live": True},
+        schedule={"enabled": False, "interval_minutes": 0, "max_runtime_minutes": 0},
+        assumptions=["当前输入不是完整交易策略，先进入教学引导。"],
+        missing_fields=[],
+        warnings=[],
+        explain=["请描述标的、方向、入场条件、止损止盈和是否模拟盘。"],
+    )
 
 
 def _find_template(template_id: str) -> StrategyTemplate | None:
@@ -360,10 +445,11 @@ def _build_exit(strategy_type: str, text: str, numbers: list[float]) -> dict[str
 
 def _build_risk(text: str, volume: float) -> dict[str, Any]:
     level = "low" if any(word in text for word in ("保守", "轻仓", "小仓")) else "high" if any(word in text for word in ("激进", "重仓")) else "medium"
+    mode = _detect_mode(text)
     return {
         "level": level,
         "max_volume": volume,
-        "paper_first": "实盘" not in text,
+        "paper_first": mode != "LIVE",
         "requires_sl_tp_before_live": True,
     }
 
