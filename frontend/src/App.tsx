@@ -986,7 +986,7 @@ function SmartPilot({
       : "从一句话生成可运行策略 JSON";
   const detail = compiledStrategy
     ? `${compiledStrategy.symbol.raw} · ${strategyTypeText(compiledStrategy.strategy_type)} · ${strategyStatusText(compiledStrategy.status)}。下一步可以调用 AI 分析，或直接启动模拟机器人观察触发条件。`
-    : "当前是模板 + 规则编译器，不假装已经是完全自由自然语言 AI；先把小白常用策略变成可复核、可运行的 JSON。";
+    : "直接像聊天一样描述策略，助手会先用人话回复，再把它整理成可复核、可运行的策略 JSON。";
 
   const strategyDisabled = !backendReady || !strategyPrompt.trim();
   const aiAnalyzeDisabled = analyzing || !backendReady || !modelReady || !compiledStrategy;
@@ -1016,12 +1016,19 @@ function SmartPilot({
               <PilotCheckpoint icon={modelReady ? Brain : Settings} label="AI 分析" value={modelReady ? "可用" : "未配置"} ok={modelReady} />
             </div>
             <div className="mt-4 rounded-md border border-neutral-200 bg-[#f7f7f4] p-3">
+              <div className="mb-2 flex items-center justify-between gap-2 text-xs text-neutral-500">
+                <span>把你的想法发给策略助手</span>
+                <span>当前：规则编译，不会自动实盘</span>
+              </div>
               <textarea
                 value={strategyPrompt}
                 onChange={(event) => setStrategyPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !strategyDisabled) onStrategyPrompt();
+                }}
                 rows={3}
                 className="w-full resize-none bg-transparent text-sm leading-6 text-neutral-900 outline-none placeholder:text-neutral-400"
-                placeholder="例如：黄金 H1 突破 4200 后模拟盘做多，止损 4170，止盈 4260，0.1 手"
+                placeholder="例如：黄金 H1 突破 4200 后模拟盘做多，止损 4170，止盈 4260，0.1 手。按 Ctrl+Enter 发送。"
               />
               {strategyDraft && (
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -1031,6 +1038,7 @@ function SmartPilot({
                 </div>
               )}
             </div>
+            <AssistantReplyCard strategy={compiledStrategy} modelReady={modelReady} backendReady={backendReady} />
             <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
               {visibleTemplates.length === 0 && (
                 <div className="col-span-full rounded-md border border-dashed border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-500">
@@ -1064,7 +1072,7 @@ function SmartPilot({
                 className="flex h-10 items-center gap-2 rounded-md bg-emerald-600 px-4 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Bot size={16} />
-                编译策略 JSON
+                发送给策略助手
               </button>
               <button
                 onClick={() => compiledStrategy && onQuickAnalyze(compiledStrategy.symbol.raw)}
@@ -1187,6 +1195,101 @@ function StrategyMeta({ label, value }: { label: string; value: ReactNode }) {
     <div className="rounded-md border border-neutral-200 bg-white p-2">
       <div className="text-[11px] text-neutral-500">{label}</div>
       <div className="mt-1 truncate text-xs font-semibold text-neutral-900">{value}</div>
+    </div>
+  );
+}
+
+function AssistantReplyCard({
+  strategy,
+  modelReady,
+  backendReady,
+}: {
+  strategy: CompiledStrategy | null;
+  modelReady: boolean;
+  backendReady: boolean;
+}) {
+  if (!backendReady) {
+    return (
+      <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+        <div className="font-semibold">助手回复</div>
+        <div className="mt-1">我现在连不上本地后端，所以还不能读取你的策略。先启动后端服务，再回到这里发送一句话。</div>
+      </div>
+    );
+  }
+
+  if (!strategy) {
+    return (
+      <div className="mt-3 rounded-md border border-dashed border-neutral-300 bg-white p-3 text-sm leading-6 text-neutral-600">
+        <div className="flex items-center gap-2 font-semibold text-neutral-900">
+          <Bot size={15} />
+          助手会这样回复你
+        </div>
+        <div className="mt-2">
+          你发送后，我会先告诉你：“我理解你要交易什么、方向是什么、什么时候入场、止损止盈在哪里、下一步该点哪个按钮。”
+        </div>
+        <div className="mt-2 text-xs text-neutral-500">看不懂 JSON 没关系，小白只看这里和下方机器人面板就够了。</div>
+      </div>
+    );
+  }
+
+  const missing = strategy.missing_fields;
+  const warnings = strategy.warnings;
+  const ready = strategy.status === "ready";
+  const entryPrice = typeof strategy.entry.price === "number" && strategy.entry.price > 0 ? fmtPrice(strategy.entry.price) : "";
+  const strategyManagedExit = ["grid", "dca", "trend_following"].includes(strategy.strategy_type);
+  const exitText = strategyManagedExit
+    ? "按策略规则退出，当前版本不拆分真实订单"
+    : `SL ${String(strategy.exit.stop_loss || "--")} / TP ${String(strategy.exit.take_profit || "--")}`;
+  const entryText = entryPrice
+    ? `价格到 ${entryPrice} 附近触发`
+    : strategy.entry.type === "grid_range"
+      ? `${fmtPrice(Number(strategy.entry.low))} - ${fmtPrice(Number(strategy.entry.high))} 区间网格观察`
+      : strategy.entry.type === "indicator"
+        ? `${String(strategy.entry.indicator || "指标")} 条件触发`
+        : "入场条件还需要你补充确认";
+
+  const steps = [
+    ready ? "第一步：先检查我识别的标的、方向、入场、止损止盈是否符合你的意思。" : "第一步：先补齐黄色提示里的缺失参数，尤其是入场价和止损。",
+    "第二步：确认无误后，点“启动模拟机器人”，它只会跑 DEMO，不会实盘。",
+    "第三步：到“模拟盘机器人运行面板”点“执行一次”，看它是否生成 MT5 模拟信号。",
+    modelReady ? "第四步：如果想让大模型再解释行情背景，再点“AI 分析行情”。" : "第四步：模型还没配置，所以现在先做规则编译和模拟观察；配置模型后才能做 AI 行情解释。",
+  ];
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-md border border-emerald-200 bg-emerald-50">
+      <div className="border-b border-emerald-100 bg-white/70 px-3 py-2">
+        <div className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
+          <Bot size={16} />
+          助手回复：我已经读懂你的策略
+        </div>
+      </div>
+      <div className="space-y-3 p-3 text-sm leading-6 text-neutral-700">
+        <div>
+          我理解你想用 <span className="font-semibold text-neutral-950">{strategy.symbol.raw}</span> 做
+          <span className="font-semibold text-neutral-950"> {strategyTypeText(strategy.strategy_type)}</span>，
+          方向是 <span className="font-semibold text-neutral-950">{actionText(strategy.action)}</span>，
+          周期按 <span className="font-semibold text-neutral-950">{strategy.timeframe}</span> 处理，
+          当前只建议走 <span className="font-semibold text-neutral-950">模拟盘</span>。
+        </div>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          <StrategyMeta label="什么时候进" value={entryText} />
+          <StrategyMeta label="怎么退出" value={exitText} />
+          <StrategyMeta label="仓位" value={`${strategy.volume || 0.1} 手 · 风险 ${riskText(strategy.risk.level)}`} />
+        </div>
+        {(missing.length > 0 || warnings.length > 0) && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+            {[...missing.map((item) => `还缺少：${item}`), ...warnings].slice(0, 4).map((item) => (
+              <div key={item}>• {item}</div>
+            ))}
+          </div>
+        )}
+        <div className="rounded-md border border-emerald-100 bg-white p-3">
+          <div className="text-xs font-semibold text-neutral-900">下一步照着做</div>
+          <div className="mt-2 space-y-1 text-xs leading-5 text-neutral-600">
+            {steps.map((step) => <div key={step}>• {step}</div>)}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

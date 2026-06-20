@@ -189,7 +189,7 @@ def compile_strategy(payload: dict[str, Any]) -> dict[str, Any]:
     volume = _detect_volume(merged_text, default=0.01 if "轻仓" in merged_text else 0.1)
     numbers = _numbers(merged_text)
     entry = _build_entry(strategy_type, action, merged_text, numbers)
-    exit_rules = _build_exit(merged_text, numbers)
+    exit_rules = _build_exit(strategy_type, merged_text, numbers)
     risk = _build_risk(merged_text, volume)
     schedule = {
         "enabled": False,
@@ -299,7 +299,11 @@ def _detect_action(text: str, strategy_type: str) -> str:
 
 
 def _detect_mode(text: str) -> str:
-    if "实盘" in text or "live" in text.lower():
+    lower = text.lower()
+    demo_markers = ("模拟盘", "demo", "paper", "不要实盘", "不实盘", "非实盘", "先不要实盘", "不要自动实盘")
+    if any(marker in text or marker in lower for marker in demo_markers):
+        return "DEMO"
+    if "实盘" in text or "live" in lower:
         return "LIVE"
     return "DEMO"
 
@@ -338,12 +342,13 @@ def _build_entry(strategy_type: str, action: str, text: str, numbers: list[float
     return {"type": "price", "operator": operator, "price": price, "trigger": strategy_type}
 
 
-def _build_exit(text: str, numbers: list[float]) -> dict[str, Any]:
+def _build_exit(strategy_type: str, text: str, numbers: list[float]) -> dict[str, Any]:
     sl = _value_after_label(text, ("止损", "sl"))
     tp = _value_after_label(text, ("止盈", "目标", "tp"))
-    if sl == 0 and len(numbers) >= 2:
+    fallback_price_exit_types = {"breakout", "breakdown", "pullback", "discretionary"}
+    if strategy_type in fallback_price_exit_types and sl == 0 and len(numbers) >= 2:
         sl = numbers[-2]
-    if tp == 0 and len(numbers) >= 2:
+    if strategy_type in fallback_price_exit_types and tp == 0 and len(numbers) >= 2:
         tp = numbers[-1]
     return {
         "stop_loss": sl,
@@ -382,7 +387,7 @@ def _missing_fields(strategy_type: str, entry: dict[str, Any], exit_rules: dict[
             missing.append("entry.low")
         if not entry.get("high"):
             missing.append("entry.high")
-    if strategy_type != "observe":
+    if strategy_type not in {"observe", "grid", "dca", "trend_following"}:
         if not exit_rules.get("stop_loss"):
             missing.append("exit.stop_loss")
         if not exit_rules.get("take_profit") and strategy_type not in {"dca", "grid", "trend_following"}:
